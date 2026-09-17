@@ -1699,3 +1699,400 @@ def handle_message(message):
         print(f"⚠️ خطا handle_message: {e}")
         traceback.print_exc()
 # ═══ پایان بخش ۲۰ ═══
+# ═══ Callback ═══
+def handle_callback(callback):
+    try:
+        callback_id = callback["id"]
+        data = callback["data"]
+        user_id = str(callback["from"]["id"])
+        message = callback.get("message", {})
+        chat_id = message.get("chat", {}).get("id", CHANNEL_ID)
+
+        if is_banned(user_id):
+            answer_callback(callback_id, "🚫 مسدود شدی!", show_alert=True)
+            return
+
+        # ═══ پشتیبانی — جواب ═══
+        if data.startswith("support_reply_"):
+            sup_id = data.replace("support_reply_", "")
+            if sup_id not in db.get("support_messages", {}):
+                answer_callback(callback_id, "❌!", show_alert=True)
+                return
+            if not is_admin(user_id):
+                answer_callback(callback_id, "❌ دسترسی نداری!", show_alert=True)
+                return
+            db["pending_support_reply"] = db.get("pending_support_reply", {})
+            db["pending_support_reply"][user_id] = {"step": "waiting", "sup_id": sup_id}
+            save_db_async()
+            answer_callback(callback_id, "✏️ جوابت رو بنویس")
+            send_message(user_id, f"✏️ جوابت رو برای کاربر بنویس:\n\n🆔 {sup_id}", cancel_keyboard())
+            return
+
+        if data.startswith("support_delete_"):
+            sup_id = data.replace("support_delete_", "")
+            if sup_id in db.get("support_messages", {}):
+                db["support_messages"].pop(sup_id)
+                save_db_async()
+            answer_callback(callback_id, "🗑️ حذف شد!", show_alert=True)
+            return
+
+        # ═══ شروع بازی — ثبت‌نام ═══
+        if data == "game_join":
+            game = db.get("active_game", {})
+            if not game.get("active"):
+                answer_callback(callback_id, "❌ بازی فعالی وجود نداره!", show_alert=True)
+                return
+            if len(game.get("participants", [])) >= game.get("capacity", 0):
+                answer_callback(callback_id, "😢 ظرفیت پر شد!", show_alert=True)
+                try:
+                    send_message(int(user_id),
+                        "😢 ظرفیت بازی پر شد!\n\n"
+                        "🔒 دیگه نمی‌تونی ثبت‌نام کنی.\n"
+                        "🎮 منتظر بازی بعدی باش!"
+                    )
+                except:
+                    pass
+                return
+            if str(user_id) in game.get("participants", []):
+                answer_callback(callback_id, "⚠️ قبلاً ثبت‌نام کردی!", show_alert=True)
+                try:
+                    send_message(int(user_id),
+                        "⚠️ تو قبلاً تو این بازی ثبت‌نام کردی!\n\n"
+                        "🔒 هر کاربر فقط ۱ بار.\n"
+                        "🎮 منتظر بازی بعدی باش!"
+                    )
+                except:
+                    pass
+                return
+            game.setdefault("participants", []).append(str(user_id))
+            db["active_game"] = game
+            save_db_async()
+            answer_callback(callback_id, "✅ ثبت‌نام شدی!", show_alert=True)
+            try:
+                send_message(int(user_id),
+                    f"✅ تو بازی ثبت‌نام شدی!\n\n"
+                    f"🎮 ظرفیت: {len(game['participants'])}/{game['capacity']}\n\n"
+                    f"🔗 لینک دعوتت:\n"
+                    f"https://ble.ir/{BOT_USERNAME}?start={user_id}"
+                )
+            except:
+                pass
+            return
+
+        if data == "check_join":
+            JOIN_CACHE.pop(str(user_id), None)
+            if check_joined(user_id):
+                u = get_user(user_id)
+                if not u.get("got_start_gift"):
+                    add_coins(user_id, get_setting("start_gift", 25))
+                    u["got_start_gift"] = True
+                    save_db_async()
+                    answer_callback(callback_id, f"✅ عضو شدی!")
+                    send_message(user_id, f"✅ عضو شدی! 🎉\n🎁 25 سکه هدیه!\n💰 {get_coins(user_id):,}", main_keyboard(user_id))
+                else:
+                    answer_callback(callback_id, "✅ عضو شدی!")
+                    send_message(user_id, "✅ استفاده کن!", main_keyboard(user_id))
+            else:
+                answer_callback(callback_id, "❌ هنوز عضو نشدی!", show_alert=True)
+            return
+
+        if data == "back_to_main":
+            send_message(user_id, "🏠 منوی اصلی:", main_keyboard(user_id))
+            answer_callback(callback_id)
+            return
+
+        if data == "copy_id":
+            answer_callback(callback_id, f"✅ {user_id}", show_alert=True)
+            return
+# ═══ پایان بخش ۲۱ ═══
+        if data == "transfer_confirm":
+            pt = db["pending_transfer"].get(user_id, {})
+            if pt.get("step") != "waiting_confirm":
+                answer_callback(callback_id, "❌ منقضی!", show_alert=True)
+                return
+            target = pt["target"]
+            amount = pt["amount"]
+            fee = get_setting("transfer_fee", 2)
+            recv = pt["receiver_gets"]
+            if remove_coins(user_id, amount):
+                add_coins(target, recv)
+                add_coins(OWNER_ID, fee)
+                db["stats"]["total_transfers"] = db["stats"].get("total_transfers", 0) + 1
+                db["stats"]["owner_earnings"] = db["stats"].get("owner_earnings", 0) + fee
+                save_db_async()
+                answer_callback(callback_id, "✅ شد!")
+                send_message(user_id, f"✅ انتقال شد!\n\n👤 {target}\n💰 {amount:,}\n💸 {fee}\n🎁 {recv:,}\n💰 {get_coins(user_id):,}", main_keyboard(user_id))
+                try:
+                    send_message(int(target), f"🎉 سکه گرفتی!\n\n👤 از: {user_id}\n🪙 {recv:,}\n💰 {get_coins(target):,}")
+                except:
+                    pass
+            else:
+                answer_callback(callback_id, "❌ سکه کافی نداری!", show_alert=True)
+            del db["pending_transfer"][user_id]
+            save_db_async()
+            return
+
+        if data == "transfer_cancel":
+            db["pending_transfer"].pop(user_id, None)
+            save_db_async()
+            answer_callback(callback_id, "❌ لغو!")
+            send_message(user_id, "❌ لغو شد!", main_keyboard(user_id))
+            return
+
+        if data.startswith("packet_"):
+            pid = data.replace("packet_", "")
+            if pid not in db.get("coin_packets", {}):
+                answer_callback(callback_id, "❌ وجود نداره!", show_alert=True)
+                return
+            p = db["coin_packets"][pid]
+            if str(user_id) in p["used_by"]:
+                answer_callback(callback_id, "⚠️ قبلاً!", show_alert=True)
+                return
+            if len(p["used_by"]) >= p["capacity"]:
+                answer_callback(callback_id, "😢 دیر رسیدی!", show_alert=True)
+                return
+            p["used_by"].append(str(user_id))
+            add_coins(user_id, p["coins"])
+            save_db_async()
+            answer_callback(callback_id, f"🎉 {p['coins']:,} سکه!", show_alert=True)
+            return
+# ═══ پایان بخش ۲۲ ═══
+        # ═══ دیدم (سین) ═══
+        if data.startswith("seen_"):
+            oid = data.replace("seen_", "")
+            if oid not in db["orders"]:
+                answer_callback(callback_id, "❌!")
+                return
+            order = db["orders"][oid]
+            if order["status"] != "active":
+                answer_callback(callback_id, "✅ تموم!")
+                return
+            if str(user_id) in db["seen_records"].get(oid, []):
+                answer_callback(callback_id, "⚠️ قبلاً!")
+                return
+            db["seen_records"][oid].append(str(user_id))
+            order["seen_count"] += 1
+            reward = get_setting('seen_reward', 1)
+            add_coins(user_id, reward)
+            ns = order["seen_count"]
+            count = order["count"]
+            onum = order.get("order_number", "?")
+            answer_callback(
+                callback_id,
+                f"👁️ دیدم زدی!\n\n"
+                f"🎁 +{reward} سکه گرفتی\n"
+                f"💰 موجودی جدید: {get_coins(user_id):,} سکه",
+                show_alert=True
+            )
+            if order.get("reply_message_id"):
+                kb = {"inline_keyboard": [[{"text": "👁️ دیدم", "callback_data": f"seen_{oid}"}, {"text": "🤖 مشاهده ربات", "url": BOT_LINK}], [{"text": "🚨 گزارش", "callback_data": f"report_{oid}"}]]}
+                try:
+                    edit_message_text(CHANNEL_ID, order["reply_message_id"], f"📋 سفارش سین\n\n👤 تعداد سین درخواستی: {count}\n👁️ تعداد سین شده: {ns}\n#{onum}", kb)
+                except:
+                    pass
+            if ns >= count:
+                order["status"] = "completed"
+                db["stats"]["completed_orders"] += 1
+                try:
+                    delete_message(CHANNEL_ID, order["message_id"])
+                    db["stats"]["deleted_messages"] += 1
+                except:
+                    pass
+                try:
+                    if order.get("reply_message_id"):
+                        delete_message(CHANNEL_ID, order["reply_message_id"])
+                except:
+                    pass
+                try:
+                    send_message(int(order["user_id"]),
+                        f"🎉 تبریک داداش!\n\n"
+                        f"🔢 {count} سین درخواستی تو کامل خورد!\n"
+                        f"📩 پیام از کانال حذف شد.\n\n"
+                        f"💡 حالا می‌تونی:\n"
+                        f"• 🪙 بری کسب سکه کنی\n"
+                        f"• 👁️ سفارش جدید ثبت کنی\n"
+                        f"• 🚀 اگه سکه داری، همین الان ثبت کن!",
+                        main_keyboard(order["user_id"])
+                    )
+                except:
+                    pass
+            save_db_async()
+            return
+
+        if data.startswith("report_"):
+            oid = data.replace("report_", "")
+            if oid not in db["orders"]:
+                answer_callback(callback_id, "❌!", show_alert=True)
+                return
+            order = db["orders"][oid]
+            rn = callback["from"].get("username", "?")
+            answer_callback(callback_id, "🚨 شد!", show_alert=True)
+            try:
+                send_message(int(OWNER_ID), f"🚨 گزارش سین\n\n👤 @{rn}\n📝 #{order.get('order_number', '?')}\n🔢 {order['count']}\n👁️ {order['seen_count']}")
+            except:
+                pass
+            return
+
+        if data.startswith("info_"):
+            mid = data.replace("info_", "")
+            o = db["member_orders"].get(mid, {})
+            reward = o.get("reward", 3)
+            otype = o.get("order_type", "normal")
+            if otype == "guaranteed":
+                answer_callback(callback_id, f"🪙 {reward}!\n⚠️ ۴۸ ساعت بمون!", show_alert=True)
+            else:
+                answer_callback(callback_id, f"🪙 {reward} سکه!", show_alert=True)
+            return
+# ═══ پایان بخش ۲۳ ═══
+        # ═══ عضو شدم (عضوگیر) ═══
+        if data.startswith("mjoin_"):
+            mid = data.replace("mjoin_", "")
+            if mid not in db["member_orders"]:
+                answer_callback(callback_id, "❌!", show_alert=True)
+                return
+            order = db["member_orders"][mid]
+            if order["status"] != "active":
+                answer_callback(callback_id, "✅ تموم!", show_alert=True)
+                return
+            if str(user_id) in db["member_records"].get(mid, []):
+                answer_callback(callback_id, "⚠️ قبلاً!", show_alert=True)
+                return
+            if order.get("user_id") == str(user_id):
+                answer_callback(callback_id, "❌ تو سفارش خودت!", show_alert=True)
+                return
+            tcid = order["chat_id"]
+            ms = get_chat_member(tcid, user_id)
+            if ms.get("ok") and ms["result"]["status"] in ["member", "administrator", "creator"]:
+                db["member_records"][mid].append(str(user_id))
+                order["seen_count"] += 1
+                reward = order.get("reward", 3)
+                add_coins(user_id, reward)
+                order.setdefault("join_times", {})[str(user_id)] = str(datetime.now())
+                ns = order["seen_count"]
+                count = order["count"]
+                mnum = order.get("order_number", "?")
+                tname = "معمولی" if order.get("order_type") == "normal" else "تضمینی"
+                answer_callback(
+                    callback_id,
+                    f"✅ عضو شدی!\n\n"
+                    f"🎁 +{reward} سکه گرفتی\n"
+                    f"💰 موجودی جدید: {get_coins(user_id):,} سکه",
+                    show_alert=True
+                )
+                if order.get("message_id"):
+                    kb = {"inline_keyboard": [
+                        [{"text": f"🪙 {reward} سکه!", "callback_data": f"info_{mid}"}],
+                        [{"text": "🔗 عضویت در کانال", "url": order["link"]}, {"text": "✅ عضو شدم", "callback_data": f"mjoin_{mid}"}],
+                        [{"text": "🚨 گزارش", "callback_data": f"mreport_{mid}"}, {"text": "🤖 مشاهده ربات", "url": BOT_LINK}]
+                    ]}
+                    try:
+                        edit_message_text(CHANNEL_ID, order["message_id"], f"📋 سفارش عضو - {tname}\n\n🔗 لینک کانال: {order['link']}\n👥 تعداد درخواستی: {count}\n✅ تعداد عضو شده: {ns}\n#{mnum}\n\n🪙 {reward} سکه میگیری!", kb)
+                    except:
+                        pass
+                if ns >= count:
+                    order["status"] = "completed"
+                    db["stats"]["completed_members"] = db["stats"].get("completed_members", 0) + 1
+                    try:
+                        delete_message(CHANNEL_ID, order["message_id"])
+                    except:
+                        pass
+                    try:
+                        send_message(int(order["user_id"]),
+                            f"🎉 تبریک داداش!\n\n"
+                            f"👥 {count} عضو درخواستی تو کامل شد!\n"
+                            f"📩 پیام از کانال حذف شد.\n\n"
+                            f"💡 حالا می‌تونی:\n"
+                            f"• 🪙 بری کسب سکه کنی\n"
+                            f"• 👥 سفارش عضو جدید ثبت کنی\n"
+                            f"• 🚀 اگه سکه داری، همین الان ثبت کن!",
+                            main_keyboard(order["user_id"])
+                        )
+                    except:
+                        pass
+            else:
+                answer_callback(callback_id, "❌ هنوز عضو نشدی!", show_alert=True)
+            save_db_async()
+            return
+
+        if data.startswith("mreport_"):
+            mid = data.replace("mreport_", "")
+            if mid not in db["member_orders"]:
+                answer_callback(callback_id, "❌!", show_alert=True)
+                return
+            order = db["member_orders"][mid]
+            rn = callback["from"].get("username", "?")
+            answer_callback(callback_id, "🚨 شد!", show_alert=True)
+            try:
+                send_message(int(OWNER_ID), f"🚨 گزارش عضو\n\n👤 @{rn}\n📝 #{order.get('order_number', '?')}\n🔗 {order['link']}")
+            except:
+                pass
+            return
+
+    except Exception as e:
+        print(f"⚠️ خطا callback: {e}")
+        traceback.print_exc()
+# ═══ پایان بخش ۲۴ ═══
+# ═══ حلقه اصلی ═══
+last_update_id = 0
+
+
+def main_loop():
+    global last_update_id
+    print("⚡ هایپرسین بله")
+    print(f"🤖 @{BOT_USERNAME}")
+    print("-" * 40)
+    while True:
+        try:
+            updates = api_call("getUpdates", {"offset": last_update_id + 1, "limit": 100, "timeout": 3})
+            if updates.get("ok") and updates.get("result"):
+                for update in updates["result"]:
+                    last_update_id = update["update_id"]
+                    if "message" in update:
+                        executor.submit(handle_message, update["message"])
+                    elif "callback_query" in update:
+                        executor.submit(handle_callback, update["callback_query"])
+            time.sleep(0.01)
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"⚠️ خطا: {e}")
+            time.sleep(0.3)
+
+
+def self_ping():
+    while True:
+        try:
+            time.sleep(180)
+            send_message(OWNER_ID, "ping")
+        except:
+            time.sleep(60)
+
+
+# ═══ Flask ═══
+app = Flask(__name__)
+
+
+@app.route('/')
+def home():
+    return "🤖 Hypersin Bale Bot!"
+
+
+@app.route('/ping')
+def ping():
+    return "pong ✅"
+
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "online", "users": len(db.get("users", {})), "cache": len(CACHE)})
+
+
+# ═══ اجرا ═══
+if __name__ == "__main__":
+    threading.Thread(target=save_worker, daemon=True).start()
+    threading.Thread(target=cache_cleanup, daemon=True).start()
+    threading.Thread(target=self_ping, daemon=True).start()
+    threading.Thread(target=main_loop, daemon=True).start()
+    threading.Thread(target=check_members_leaves, daemon=True).start()
+    app.run(host="0.0.0.0", port=10000)
+# ═══ پایان کد ═══
